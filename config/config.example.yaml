@@ -1,0 +1,25 @@
+application:
+  name: local-ai
+  environment: development
+  log_level: INFO
+
+inference:
+  provider: ollama
+  base_url: http://192.168.1.10:11434
+  default_model: qwen3:4b
+  timeout: 180
+  # Whether thinking models (qwen3) reason before answering. Leave empty for
+  # the model's default; the reasoning is hidden either way. true or false
+  # sends the setting, but some qwen3 versions still reason (and show it) when
+  # it's false. Override with --think on|off or /think in the chat.
+  think:
+
+storage:
+  database: data/databases/local_ai.db
+  projects: projects/
+  logs: logs/
+
+agents:
+  default_agent: general
+  max_iterations: 10
+  require_approval_for_tools: true

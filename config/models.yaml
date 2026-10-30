@@ -1,0 +1,21 @@
+models:
+  general:
+    provider: ollama
+    name: qwen3:4b
+    capabilities:
+      - chat
+      - reasoning
+
+  coding:
+    provider: ollama
+    name: qwen2.5-coder:3b
+    capabilities:
+      - chat
+      - coding
+
+  lightweight:
+    provider: ollama
+    name: qwen3:0.6b
+    capabilities:
+      - classification
+      - formatting

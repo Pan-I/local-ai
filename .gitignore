@@ -1,0 +1,128 @@
+# ==========================================
+# Python
+# ==========================================
+
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# ==========================================
+# Environment variables and local config
+# ==========================================
+
+.env
+.env.*
+!.env.example
+
+config/local.yaml
+config/local.yml
+config/secrets.yaml
+config/secrets.yml
+
+# ==========================================
+# IDEs and editors
+# ==========================================
+
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# ==========================================
+# Operating system
+# ==========================================
+
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# ==========================================
+# Databases and persistent state
+# ==========================================
+
+*.db
+*.sqlite
+*.sqlite3
+*.db-journal
+*.sqlite-journal
+
+# ==========================================
+# Logs
+# ==========================================
+
+logs/
+*.log
+*.log.*
+
+# ==========================================
+# Generated data and indexes
+# ==========================================
+
+data/embeddings/
+data/indexes/
+data/cache/
+cache/
+tmp/
+temp/
+
+# ==========================================
+# Agent execution state
+# ==========================================
+
+**/agent_state.json
+**/execution_state.json
+**/checkpoints/
+
+# ==========================================
+# Project workspaces and generated artifacts
+# ==========================================
+
+projects/*/workspace/
+projects/*/artifacts/
+projects/*/outputs/
+
+# ==========================================
+# Backups
+# ==========================================
+
+backups/
+*.bak
+*.backup
+*.old
+
+# ==========================================
+# Model files
+# ==========================================
+
+models/
+*.gguf
+*.safetensors
+*.onnx
+*.pt
+*.pth
+*.bin
+
+# ==========================================
+# Miscellaneous
+# ==========================================
+
+*.tmp
+*.temp
+*.orig

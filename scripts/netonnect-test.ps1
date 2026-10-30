@@ -1,0 +1,1 @@
+﻿Test-NetConnection 192.168.1.20 -Port 11434
