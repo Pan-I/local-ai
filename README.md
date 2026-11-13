@@ -11,12 +11,27 @@ python -m app.main --check     # test the connection and list installed models
 python -m app.main             # start chatting
 ```
 
-Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/reset`, `/help`, `/exit`.
+Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/help`, `/exit`.
 After each reply it prints tokens, tokens/sec, model load time, and total time, which is handy for the performance baseline.
 
 `inference.think` is left empty by default, so qwen3 reasons first and Ollama hides the reasoning.
 That reasoning is most of the wait on CPU. Setting it to `false` (or `--think off`, `/think off`) asks the
 model to skip it, but the current qwen3 on the ai-pc reasons anyway and prints it.
+
+## Saved conversations
+
+Every chat is saved to a SQLite file at `data/databases/local_ai.db` (set by `storage.database`).
+The folder is created the first time you chat, and the file is ignored by git.
+
+- `/history` lists your recent conversations with their ids.
+- `/load 3` continues conversation 3, with the model you're using now.
+- `/reset` starts a new conversation. The old one stays saved.
+- `python -m app.main --no-save` chats without saving, or set `storage.save_conversations: false`.
+
+Only your messages and the replies are saved, along with each reply's stats (tokens, tok/s, time).
+The model's hidden thinking text isn't saved.
+
+To look inside the file, any SQLite viewer works, such as "DB Browser for SQLite".
 
 ## Pointing it at the ai-pc
 
@@ -54,4 +69,5 @@ The tests use a fake Ollama server, so they pass without the ai-pc.
 - `app/ollama_client.py` is the only code that knows Ollama's API
 - `app/conversation.py` keeps the message history for a chat
 - `app/main.py` is the command-line chat
+- `storage/database.py` saves conversations to SQLite
 - `prompts/system/system.txt` is the system prompt

@@ -15,7 +15,10 @@ inference:
   think:
 
 storage:
+  # Conversations are saved here (relative to the local-ai folder). Set
+  # save_conversations to false, or run with --no-save, to turn it off.
   database: data/databases/local_ai.db
+  save_conversations: true
   projects: projects/
   logs: logs/
 
