@@ -126,3 +126,4 @@ models/
 *.tmp
 *.temp
 *.orig
+*.patch
