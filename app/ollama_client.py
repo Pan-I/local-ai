@@ -76,6 +76,29 @@ class OllamaClient:
         with self._request("GET", "/api/tags") as resp:
             return [m["name"] for m in json.load(resp).get("models", [])]
 
+    def embed(self, model: str, texts: list[str]) -> list[list[float]]:
+        """Turn each text into an embedding (a list of numbers describing its meaning).
+
+        Uses Ollama's /api/embed, which takes several texts in one request.
+        Returns one vector per text, in the same order.
+        """
+        if not texts:
+            return []
+        body = {"model": model, "input": list(texts)}
+        with self._request("POST", "/api/embed", body) as resp:
+            try:
+                data = json.load(resp)
+            except TimeoutError as e:
+                raise OllamaError(f"Timed out waiting for Ollama at {self.base_url}") from e
+            except (OSError, http.client.HTTPException) as e:
+                raise OllamaError(f"Lost connection to Ollama at {self.base_url}: {e}") from e
+            except ValueError as e:
+                raise OllamaError(f"Ollama sent a reply that isn't valid JSON: {e}") from e
+        vectors = data.get("embeddings")
+        if not isinstance(vectors, list) or len(vectors) != len(texts):
+            raise OllamaError(f"Ollama returned {len(vectors or [])} embeddings for {len(texts)} texts")
+        return vectors
+
     def chat(
         self,
         model: str,

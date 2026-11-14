@@ -5,6 +5,7 @@ Run from the local-ai folder:
     python -m app.main --model qwen3:0.6b
     python -m app.main --check
     python -m app.main --no-save
+    python -m app.main --index       # read the approved folders into the knowledge index
 """
 
 import argparse
@@ -16,6 +17,9 @@ from pathlib import Path
 from app.config import ROOT, load_config
 from app.conversation import Conversation
 from app.ollama_client import OllamaClient, OllamaError
+from retrieval.indexer import Indexer, IndexReport, KnowledgeSettings
+from retrieval.retriever import Retriever
+from retrieval.store import KnowledgeStore
 from storage.database import ConversationStore
 
 HELP = """Commands:
@@ -26,6 +30,9 @@ HELP = """Commands:
   /history        list recent saved conversations
   /load <id>      continue a saved conversation
   /reset          start a new conversation (the old one stays saved)
+  /kb [on|off]    show or set whether answers use your documents
+  /sources        show the passages the last answer was given
+  /index          update the knowledge index from the approved folders
   /exit           quit"""
 
 
@@ -98,6 +105,56 @@ def print_history(store: ConversationStore | None) -> None:
         print(f"{c.id:>4}  {when}  {c.model:<16}  {c.message_count:>3} msgs  {c.title}")
 
 
+def open_knowledge(settings: KnowledgeSettings) -> KnowledgeStore | None:
+    try:
+        return KnowledgeStore(settings.database)
+    except (sqlite3.Error, OSError) as e:
+        print(f"Warning: can't open the knowledge index at {settings.database} ({e}).")
+        return None
+
+
+def run_index(client: OllamaClient, knowledge: KnowledgeStore, settings: KnowledgeSettings,
+              rebuild: bool = False) -> int:
+    print(f"Indexing with {settings.embedding_model} at {client.base_url}:")
+    for folder in settings.folders:
+        print(f"  {folder}")
+    try:
+        report = Indexer(client, knowledge, settings, progress=print).run(rebuild=rebuild)
+    except OllamaError as e:
+        print(f"Error: {e}")
+        if "not found" in str(e):
+            print(f"On the ai-pc, run:  ollama pull {settings.embedding_model}")
+        print("Files finished before the error are saved; run it again to continue.")
+        return 1
+    print_report(report, knowledge)
+    return 0
+
+
+def print_report(report: IndexReport, knowledge: KnowledgeStore) -> None:
+    for folder in report.missing_folders:
+        print(f"  Folder not found, skipped: {folder}")
+    for path in report.removed:
+        print(f"  removed {path}")
+    files, chunks = knowledge.counts()
+    print(
+        f"Done in {report.seconds:.1f}s: {len(report.added)} added, {len(report.updated)} updated, "
+        f"{report.unchanged} unchanged, {len(report.removed)} removed, "
+        f"{len(report.skipped)} skipped. The index has {chunks} chunks from {files} files."
+    )
+
+
+def print_sources(hits, verbose: bool = False) -> None:
+    if not hits:
+        print("No passages from your documents were used.")
+        return
+    print("Sources:")
+    for i, hit in enumerate(hits, start=1):
+        print(f"  [{i}] {hit.reference}  match {hit.score:.2f}")
+        if verbose:
+            preview = " ".join(hit.text.split())
+            print(f"      {preview[:200]}{'...' if len(preview) > 200 else ''}")
+
+
 def print_stats(result) -> None:
     print(
         f"[{result.model} | {result.completion_tokens} tokens, "
@@ -115,6 +172,12 @@ def main(argv=None) -> int:
     parser.add_argument("--no-stream", action="store_true", help="wait for the full reply")
     parser.add_argument("--think", choices=["on", "off"], help="override inference.think for this run")
     parser.add_argument("--no-save", action="store_true", help="don't save this chat to the database")
+    parser.add_argument("--index", action="store_true",
+                        help="update the knowledge index from knowledge.folders and exit")
+    parser.add_argument("--rebuild-index", action="store_true",
+                        help="re-embed every document from scratch and exit")
+    parser.add_argument("--no-kb", action="store_true",
+                        help="don't use your documents in this chat")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -135,13 +198,31 @@ def main(argv=None) -> int:
     if args.check:
         return check(client, model)
 
+    settings = KnowledgeSettings.from_config(config)
+    knowledge = open_knowledge(settings)
+    if args.index or args.rebuild_index:
+        if knowledge is None:
+            return 1
+        return run_index(client, knowledge, settings, rebuild=args.rebuild_index)
+
     store = open_store(config.get("storage", {}), args.no_save)
-    convo = Conversation(client, model, load_system_prompt(), think=think, store=store)
+    retriever = Retriever(client, knowledge, settings) if knowledge else None
+    convo = Conversation(client, model, load_system_prompt(), think=think, store=store,
+                         retriever=retriever)
     print(f"Chatting with {model} at {base_url}. Type /help for commands.")
     if store:
         print(f"Saving conversations to {store.path}")
     else:
         print("This chat won't be saved.")
+    if knowledge:
+        files, chunks = knowledge.counts()
+        convo.use_knowledge = settings.use_in_chat and not args.no_kb and chunks > 0
+        if chunks == 0:
+            print("Your documents aren't indexed yet. Add files to an approved folder and "
+                  "run /index (or python -m app.main --index).")
+        else:
+            state = "on" if convo.use_knowledge else "off (/kb on to use it)"
+            print(f"Knowledge: {chunks} chunks from {files} files, {state}.")
 
     while True:
         try:
@@ -174,6 +255,33 @@ def main(argv=None) -> int:
                           f"Still using {convo.model}.")
                 else:
                     print(f"No saved conversation with id {arg.strip()}.")
+            elif cmd == "/kb":
+                setting = arg.strip().lower()
+                if knowledge is None:
+                    print("The knowledge index couldn't be opened, so this is unavailable.")
+                    continue
+                if setting in ("on", "off"):
+                    convo.use_knowledge = setting == "on"
+                elif setting:
+                    print("Use /kb on or /kb off.")
+                    continue
+                files, chunks = knowledge.counts()
+                state = "on" if convo.use_knowledge else "off"
+                print(f"Using your documents is {state}. The index has {chunks} chunks "
+                      f"from {files} files, built with {settings.embedding_model}.")
+                if convo.use_knowledge and chunks == 0:
+                    print("The index is empty. Run /index after adding files.")
+            elif cmd == "/sources":
+                print_sources(convo.last_sources, verbose=True)
+            elif cmd == "/index":
+                if knowledge is None:
+                    print("The knowledge index couldn't be opened, so this is unavailable.")
+                else:
+                    was_empty = knowledge.counts()[1] == 0
+                    # Turn retrieval on if this filled an empty index.
+                    if run_index(client, knowledge, settings) == 0 and was_empty \
+                            and knowledge.counts()[1]:
+                        convo.use_knowledge = settings.use_in_chat and not args.no_kb
             elif cmd == "/models":
                 try:
                     print("\n".join(client.list_models()) or "(no models installed)")
@@ -214,6 +322,12 @@ def main(argv=None) -> int:
         if not stream:
             print(result.content, end="")
         print()
+        if convo.last_sources:
+            print_sources(convo.last_sources)
+        elif convo.use_knowledge and not convo.knowledge_error:
+            print("(No closely matching passages in your documents.)")
+        if convo.knowledge_error:
+            print(f"Warning: couldn't search your documents ({convo.knowledge_error}).")
         print_stats(result)
         if convo.save_error:
             print(f"Warning: this reply wasn't saved ({convo.save_error}).")

@@ -26,3 +26,28 @@ agents:
   default_agent: general
   max_iterations: 10
   require_approval_for_tools: true
+knowledge:
+  # Folders the app may read documents from (relative to the local-ai folder,
+  # or full paths like "C:/Users/me/Documents/notes"). Nothing outside these
+  # is indexed. Run `python -m app.main --index` after adding files.
+  folders:
+    - knowledge
+  # The index of chunks and embeddings. Safe to delete; --index rebuilds it.
+  database: data/indexes/knowledge.db
+  # Embedding model on the Ollama server. Install it on the ai-pc with
+  # `ollama pull nomic-embed-text`. Changing it re-indexes everything.
+  embedding_model: nomic-embed-text
+  # Labels some models want in front of documents and questions. Left out,
+  # the right ones are used for nomic-embed-text and qwen3-embedding, and none
+  # for other models.
+  # document_prefix: "search_document: "
+  # query_prefix: "search_query: "
+  chunk_size: 1000      # characters per chunk
+  chunk_overlap: 150    # a small paragraph this size or less is repeated at the start of the next chunk
+  max_file_mb: 20       # bigger files are skipped
+  # extensions: [.md, .txt, .pdf, .docx]   # left out, text, code, PDF and Word files are read
+  top_k: 4              # passages given to the model with each question
+  # How close a passage must be to the question to be used, from 0 to 1.
+  # A first guess: check the "match" scores with /sources and adjust.
+  min_score: 0.5
+  use_in_chat: true     # turn off for one chat with --no-kb, or /kb off

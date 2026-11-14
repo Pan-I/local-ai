@@ -40,6 +40,12 @@ class FakeOllama(BaseHTTPRequestHandler):
     def do_POST(self):
         body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
         FakeOllama.last_body = body
+        if self.path == "/api/embed":
+            if body["model"] == "missing":
+                return self._json(404, {"error": "model \"missing\" not found, try pulling it first"})
+            # A made-up 3-number embedding per text: its length, and two constants.
+            return self._json(200, {"model": body["model"],
+                                    "embeddings": [[len(t), 1.0, 0.0] for t in body["input"]]})
         if body["model"] == "missing":
             return self._json(404, {"error": "model 'missing' not found"})
         if body["model"] == "no-think" and "think" in body:

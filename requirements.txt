@@ -1,2 +1,4 @@
 # Python 3.11+ standard library, plus:
 pyyaml
+pypdf          # reads text from PDF files for the knowledge index
+python-docx    # reads text from Word (.docx) files for the knowledge index

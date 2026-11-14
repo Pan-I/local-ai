@@ -1,0 +1,3 @@
+# Your documents go here. They stay out of git so private files are never committed.
+*
+!.gitignore

@@ -11,7 +11,7 @@ python -m app.main --check     # test the connection and list installed models
 python -m app.main             # start chatting
 ```
 
-Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/help`, `/exit`.
+Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/kb on|off`, `/sources`, `/index`, `/help`, `/exit`.
 After each reply it prints tokens, tokens/sec, model load time, and total time, which is handy for the performance baseline.
 
 `inference.think` is left empty by default, so qwen3 reasons first and Ollama hides the reasoning.
@@ -32,6 +32,46 @@ Only your messages and the replies are saved, along with each reply's stats (tok
 The model's hidden thinking text isn't saved.
 
 To look inside the file, any SQLite viewer works, such as "DB Browser for SQLite".
+
+## Answering from your documents
+
+The app can look things up in your own files and pass the relevant passages to the model,
+then list which files (and lines or pages) it used. Nothing leaves your network: the
+embeddings are made by Ollama on the ai-pc, and the index is a SQLite file on this PC.
+
+How it works, briefly: each document is cut into chunks of about 1,000 characters. A small
+*embedding model* turns each chunk into a list of numbers that describes its meaning, so chunks
+about similar things get similar numbers. When you ask a question, it gets numbers too, and
+the closest chunks are added to your message as numbered sources.
+
+One-time setup:
+
+1. On the ai-pc, install the embedding model: `ollama pull nomic-embed-text`
+2. On this PC: `pip install -r requirements.txt` (adds `pypdf` and `python-docx` for PDF and Word files).
+3. Put documents in the `knowledge/` folder, or list other folders under `knowledge.folders`
+   in `config/local.yaml`. Only those folders are read. The contents of `knowledge/` are ignored by git.
+
+Then:
+
+```
+python -m app.main --index           # read new and changed files into the index
+python -m app.main --rebuild-index   # start the index over
+python -m app.main --no-kb           # chat without your documents
+```
+
+Run `--index` again whenever files change. Unchanged files are skipped, and deleted ones are dropped.
+It reads text, Markdown, code, PDF and Word (.docx) files, and skips hidden folders such as `.git`.
+Scanned PDFs have no text to read, so they're reported as skipped.
+
+In the chat: `/kb on|off` turns document lookup on or off, `/sources` shows the passages the last
+answer was given with a preview, and `/index` updates the index without leaving the chat.
+After each answer the app prints the sources and a match score from 0 to 1. Passages below
+`knowledge.min_score` (0.5) aren't used. That number is a first guess, so check the scores with
+`/sources` on a few real questions and raise or lower it.
+
+Sources are sent with that one question only, so they don't fill up the model's memory in later
+turns, and the saved conversation records which sources each reply used (`message_sources` table).
+The index lives in `data/indexes/knowledge.db`. It's safe to delete; `--index` rebuilds it.
 
 ## Pointing it at the ai-pc
 
@@ -70,4 +110,9 @@ The tests use a fake Ollama server, so they pass without the ai-pc.
 - `app/conversation.py` keeps the message history for a chat
 - `app/main.py` is the command-line chat
 - `storage/database.py` saves conversations to SQLite
+- `retrieval/readers.py` reads text from text, code, PDF and Word files
+- `retrieval/chunker.py` cuts text into chunks with line numbers
+- `retrieval/indexer.py` finds files in the approved folders and embeds them
+- `retrieval/store.py` keeps chunks and embeddings in SQLite and searches them
+- `retrieval/retriever.py` finds passages for a question and adds them to the prompt
 - `prompts/system/system.txt` is the system prompt

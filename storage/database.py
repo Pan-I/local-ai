@@ -38,6 +38,16 @@ CREATE TABLE IF NOT EXISTS messages (
 );
 
 CREATE INDEX IF NOT EXISTS messages_by_conversation ON messages (conversation_id, id);
+
+-- The document passages a reply was given (see retrieval/), best match first.
+CREATE TABLE IF NOT EXISTS message_sources (
+    message_id INTEGER NOT NULL REFERENCES messages(id) ON DELETE CASCADE,
+    rank       INTEGER NOT NULL,
+    file       TEXT NOT NULL,
+    location   TEXT NOT NULL,
+    score      REAL NOT NULL,
+    PRIMARY KEY (message_id, rank)
+);
 """
 
 TITLE_LENGTH = 60
@@ -96,8 +106,12 @@ class ConversationStore:
             )
         return cur.lastrowid
 
-    def add_turn(self, conversation_id: int, user_text: str, result: ChatResult) -> None:
-        """Save a user message and the model's reply together (both or neither)."""
+    def add_turn(self, conversation_id: int, user_text: str, result: ChatResult,
+                 sources=()) -> None:
+        """Save a user message and the model's reply together (both or neither).
+
+        sources are the retrieval Hits the reply was given, if any.
+        """
         stamp = now()
         with self.db:  # one transaction
             self.db.execute(
@@ -105,7 +119,7 @@ class ConversationStore:
                 " VALUES (?, 'user', ?, ?)",
                 (conversation_id, user_text, stamp),
             )
-            self.db.execute(
+            cur = self.db.execute(
                 "INSERT INTO messages (conversation_id, role, content, model, prompt_tokens,"
                 " completion_tokens, tokens_per_second, load_seconds, total_seconds, created_at)"
                 " VALUES (?, 'assistant', ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -114,6 +128,12 @@ class ConversationStore:
                     result.completion_tokens, result.tokens_per_second, result.load_seconds,
                     result.total_seconds, stamp,
                 ),
+            )
+            self.db.executemany(
+                "INSERT INTO message_sources (message_id, rank, file, location, score)"
+                " VALUES (?, ?, ?, ?, ?)",
+                [(cur.lastrowid, rank, h.display, h.location, h.score)
+                 for rank, h in enumerate(sources, start=1)],
             )
             # The first message becomes the title.
             self.db.execute(
