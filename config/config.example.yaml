@@ -32,10 +32,13 @@ knowledge:
   # is indexed. Run `python -m app.main --index` after adding files.
   folders:
     - knowledge
-  # The index of chunks and embeddings. Safe to delete; --index rebuilds it.
+  # The index of chunks and embeddings. Each embedding model gets its own file
+  # next to this name (knowledge-nomic-embed-text.db, ...), so you can switch
+  # with /embed without losing the other one. Safe to delete; --index rebuilds it.
   database: data/indexes/knowledge.db
   # Embedding model on the Ollama server. Install it on the ai-pc with
-  # `ollama pull nomic-embed-text`. Changing it re-indexes everything.
+  # `ollama pull nomic-embed-text`. Try another for one chat with /embed <name>
+  # or --embed-model <name>.
   embedding_model: nomic-embed-text
   # Labels some models want in front of documents and questions. Left out,
   # the right ones are used for nomic-embed-text and qwen3-embedding, and none

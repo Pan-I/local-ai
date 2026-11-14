@@ -33,6 +33,7 @@ HELP = """Commands:
   /kb [on|off]    show or set whether answers use your documents
   /sources        show the passages the last answer was given
   /index          update the knowledge index from the approved folders
+  /embed [name]   show or switch the embedding model (each has its own index)
   /exit           quit"""
 
 
@@ -106,10 +107,11 @@ def print_history(store: ConversationStore | None) -> None:
 
 
 def open_knowledge(settings: KnowledgeSettings) -> KnowledgeStore | None:
+    adopt_old_index(settings)
     try:
-        return KnowledgeStore(settings.database)
+        return KnowledgeStore(settings.index_path)
     except (sqlite3.Error, OSError) as e:
-        print(f"Warning: can't open the knowledge index at {settings.database} ({e}).")
+        print(f"Warning: can't open the knowledge index at {settings.index_path} ({e}).")
         return None
 
 
@@ -128,6 +130,30 @@ def run_index(client: OllamaClient, knowledge: KnowledgeStore, settings: Knowled
         return 1
     print_report(report, knowledge)
     return 0
+
+
+def adopt_old_index(settings: KnowledgeSettings) -> None:
+    """Earlier versions kept one index at knowledge.database. If it was built with
+    this model, rename it to this model's own file instead of re-embedding."""
+    old, new = settings.database, settings.index_path
+    if new.exists() or not old.is_file():
+        return
+    try:
+        store = KnowledgeStore(old)
+        built_with = store.get_setting("embedding_model")
+        store.close()
+        if built_with == settings.embedding_model:
+            old.rename(new)
+    except (sqlite3.Error, OSError):
+        pass  # leave it; the model's index is simply built fresh
+
+
+def is_installed(name: str, installed: list[str]) -> bool:
+    return name in installed or f"{name}:latest" in installed
+
+
+def looks_like_embedding_model(name: str) -> bool:
+    return any(word in name.lower() for word in ("embed", "minilm", "bge", "e5", "gte"))
 
 
 def print_report(report: IndexReport, knowledge: KnowledgeStore) -> None:
@@ -176,6 +202,7 @@ def main(argv=None) -> int:
                         help="update the knowledge index from knowledge.folders and exit")
     parser.add_argument("--rebuild-index", action="store_true",
                         help="re-embed every document from scratch and exit")
+    parser.add_argument("--embed-model", help="override knowledge.embedding_model for this run")
     parser.add_argument("--no-kb", action="store_true",
                         help="don't use your documents in this chat")
     args = parser.parse_args(argv)
@@ -199,11 +226,16 @@ def main(argv=None) -> int:
         return check(client, model)
 
     settings = KnowledgeSettings.from_config(config)
+    if args.embed_model:
+        settings = settings.with_model(args.embed_model)
     knowledge = open_knowledge(settings)
     if args.index or args.rebuild_index:
         if knowledge is None:
             return 1
-        return run_index(client, knowledge, settings, rebuild=args.rebuild_index)
+        try:
+            return run_index(client, knowledge, settings, rebuild=args.rebuild_index)
+        finally:
+            knowledge.close()
 
     store = open_store(config.get("storage", {}), args.no_save)
     retriever = Retriever(client, knowledge, settings) if knowledge else None
@@ -222,115 +254,163 @@ def main(argv=None) -> int:
                   "run /index (or python -m app.main --index).")
         else:
             state = "on" if convo.use_knowledge else "off (/kb on to use it)"
-            print(f"Knowledge: {chunks} chunks from {files} files, {state}.")
+            print(f"Knowledge: {chunks} chunks from {files} files "
+                  f"(embedded with {settings.embedding_model}), {state}.")
 
-    while True:
-        try:
-            text = input("\nYou: ").strip()
-        except (EOFError, KeyboardInterrupt):
-            print()
-            return 0
-        if not text:
-            continue
-
-        if text.startswith("/"):
-            cmd, _, arg = text.partition(" ")
-            if cmd in ("/exit", "/quit"):
+    try:
+        while True:
+            try:
+                text = input("\nYou: ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print()
                 return 0
-            elif cmd == "/help":
-                print(HELP)
-            elif cmd == "/reset":
-                convo.reset()
-                print("Started a new conversation." + (" The old one is saved." if store else ""))
-            elif cmd == "/history":
-                print_history(store)
-            elif cmd == "/load":
-                if store is None:
-                    print("Saving is off, so there's nothing to load.")
-                elif not arg.strip().isdigit():
-                    print("Use /load <id>. Type /history to see the ids.")
-                elif convo.load(int(arg)):
-                    turns = sum(1 for m in convo.messages if m["role"] == "user")
-                    print(f"Loaded conversation {convo.conversation_id} ({turns} messages from you). "
-                          f"Still using {convo.model}.")
-                else:
-                    print(f"No saved conversation with id {arg.strip()}.")
-            elif cmd == "/kb":
-                setting = arg.strip().lower()
-                if knowledge is None:
-                    print("The knowledge index couldn't be opened, so this is unavailable.")
-                    continue
-                if setting in ("on", "off"):
-                    convo.use_knowledge = setting == "on"
-                elif setting:
-                    print("Use /kb on or /kb off.")
-                    continue
-                files, chunks = knowledge.counts()
-                state = "on" if convo.use_knowledge else "off"
-                print(f"Using your documents is {state}. The index has {chunks} chunks "
-                      f"from {files} files, built with {settings.embedding_model}.")
-                if convo.use_knowledge and chunks == 0:
-                    print("The index is empty. Run /index after adding files.")
-            elif cmd == "/sources":
-                print_sources(convo.last_sources, verbose=True)
-            elif cmd == "/index":
-                if knowledge is None:
-                    print("The knowledge index couldn't be opened, so this is unavailable.")
-                else:
-                    was_empty = knowledge.counts()[1] == 0
-                    # Turn retrieval on if this filled an empty index.
-                    if run_index(client, knowledge, settings) == 0 and was_empty \
-                            and knowledge.counts()[1]:
-                        convo.use_knowledge = settings.use_in_chat and not args.no_kb
-            elif cmd == "/models":
-                try:
-                    print("\n".join(client.list_models()) or "(no models installed)")
-                except OllamaError as e:
-                    print(f"Error: {e}")
-            elif cmd == "/model":
-                if arg.strip():
-                    convo.model = arg.strip()
-                    print(f"Now using {convo.model}.")
-                else:
-                    print(f"Current model: {convo.model}")
-            elif cmd == "/think":
-                setting = arg.strip().lower()
-                if setting in THINK_SETTINGS:
-                    convo.think = THINK_SETTINGS[setting]
-                elif setting:
-                    print("Use /think on, /think off, or /think default.")
-                    continue
-                current = {True: "on", False: "off", None: "the model's default"}[convo.think]
-                print(f"Thinking is {current}.")
-            else:
-                print("Unknown command. Type /help.")
-            continue
+            if not text:
+                continue
 
-        print("\nAI: ", end="", flush=True)
-        try:
-            result = convo.send(
-                text,
-                stream=stream,
-                on_token=lambda t: print(t, end="", flush=True),
-            )
-        except OllamaError as e:
-            print(f"\nError: {e}")
-            continue
-        except KeyboardInterrupt:
-            print("\n(interrupted)")
-            continue
-        if not stream:
-            print(result.content, end="")
-        print()
-        if convo.last_sources:
-            print_sources(convo.last_sources)
-        elif convo.use_knowledge and not convo.knowledge_error:
-            print("(No closely matching passages in your documents.)")
-        if convo.knowledge_error:
-            print(f"Warning: couldn't search your documents ({convo.knowledge_error}).")
-        print_stats(result)
-        if convo.save_error:
-            print(f"Warning: this reply wasn't saved ({convo.save_error}).")
+            if text.startswith("/"):
+                cmd, _, arg = text.partition(" ")
+                if cmd in ("/exit", "/quit"):
+                    return 0
+                elif cmd == "/help":
+                    print(HELP)
+                elif cmd == "/reset":
+                    convo.reset()
+                    print("Started a new conversation." + (" The old one is saved." if store else ""))
+                elif cmd == "/history":
+                    print_history(store)
+                elif cmd == "/load":
+                    if store is None:
+                        print("Saving is off, so there's nothing to load.")
+                    elif not arg.strip().isdigit():
+                        print("Use /load <id>. Type /history to see the ids.")
+                    elif convo.load(int(arg)):
+                        turns = sum(1 for m in convo.messages if m["role"] == "user")
+                        print(f"Loaded conversation {convo.conversation_id} ({turns} messages from you). "
+                              f"Still using {convo.model}.")
+                    else:
+                        print(f"No saved conversation with id {arg.strip()}.")
+                elif cmd == "/kb":
+                    setting = arg.strip().lower()
+                    if knowledge is None:
+                        print("The knowledge index couldn't be opened, so this is unavailable.")
+                        continue
+                    if setting in ("on", "off"):
+                        convo.use_knowledge = setting == "on"
+                    elif setting:
+                        print("Use /kb on or /kb off.")
+                        continue
+                    files, chunks = knowledge.counts()
+                    state = "on" if convo.use_knowledge else "off"
+                    print(f"Using your documents is {state}. The index has {chunks} chunks "
+                          f"from {files} files, built with {settings.embedding_model}.")
+                    if convo.use_knowledge and chunks == 0:
+                        print("The index is empty. Run /index after adding files.")
+                elif cmd == "/sources":
+                    print_sources(convo.last_sources, verbose=True)
+                elif cmd == "/index":
+                    if knowledge is None:
+                        print("The knowledge index couldn't be opened, so this is unavailable.")
+                    else:
+                        was_empty = knowledge.counts()[1] == 0
+                        # Turn retrieval on if this filled an empty index.
+                        if run_index(client, knowledge, settings) == 0 and was_empty \
+                                and knowledge.counts()[1]:
+                            convo.use_knowledge = settings.use_in_chat and not args.no_kb
+                elif cmd == "/embed":
+                    name = arg.strip()
+                    if not name:
+                        print(f"Embedding model: {settings.embedding_model}")
+                        try:
+                            others = [m for m in client.list_models() if looks_like_embedding_model(m)]
+                            print("Installed embedding models: " + (", ".join(others) or "(none found)"))
+                        except OllamaError as e:
+                            print(f"Couldn't list the installed models ({e}).")
+                        print("Switch with /embed <name>.")
+                        continue
+                    try:
+                        installed = client.list_models()
+                    except OllamaError as e:
+                        print(f"Error: {e}")
+                        continue
+                    if not is_installed(name, installed):
+                        print(f"'{name}' isn't installed on the Ollama server. "
+                              f"On the ai-pc, run:  ollama pull {name}")
+                        continue
+                    new_settings = settings.with_model(name)
+                    new_knowledge = open_knowledge(new_settings)
+                    if new_knowledge is None:
+                        continue
+                    if knowledge:
+                        knowledge.close()
+                    settings, knowledge = new_settings, new_knowledge
+                    convo.retriever = Retriever(client, knowledge, settings)
+                    files, chunks = knowledge.counts()
+                    print(f"Now using {name} for embeddings (this run only; set "
+                          f"knowledge.embedding_model to keep it).")
+                    if chunks:
+                        print(f"Its index has {chunks} chunks from {files} files. "
+                              f"Match scores differ between models, so check /sources.")
+                        if not convo.use_knowledge:
+                            print("Document lookup is off; /kb on turns it on.")
+                    else:
+                        convo.use_knowledge = False
+                        print("It has no index yet, so document lookup is off. Run /index to "
+                              "build it (every file gets embedded, so this can take a while).")
+                elif cmd == "/models":
+                    try:
+                        print("\n".join(client.list_models()) or "(no models installed)")
+                    except OllamaError as e:
+                        print(f"Error: {e}")
+                elif cmd == "/model":
+                    if arg.strip():
+                        convo.model = arg.strip()
+                        print(f"Now using {convo.model}.")
+                    else:
+                        print(f"Current model: {convo.model}")
+                elif cmd == "/think":
+                    setting = arg.strip().lower()
+                    if setting in THINK_SETTINGS:
+                        convo.think = THINK_SETTINGS[setting]
+                    elif setting:
+                        print("Use /think on, /think off, or /think default.")
+                        continue
+                    current = {True: "on", False: "off", None: "the model's default"}[convo.think]
+                    print(f"Thinking is {current}.")
+                else:
+                    print("Unknown command. Type /help.")
+                continue
+
+            print("\nAI: ", end="", flush=True)
+            try:
+                result = convo.send(
+                    text,
+                    stream=stream,
+                    on_token=lambda t: print(t, end="", flush=True),
+                )
+            except OllamaError as e:
+                print(f"\nError: {e}")
+                continue
+            except KeyboardInterrupt:
+                print("\n(interrupted)")
+                continue
+            if not stream:
+                print(result.content, end="")
+            print()
+            if convo.last_sources:
+                print_sources(convo.last_sources)
+            elif convo.use_knowledge and not convo.knowledge_error:
+                print("(No closely matching passages in your documents.)")
+            if convo.knowledge_error:
+                print(f"Warning: couldn't search your documents ({convo.knowledge_error}).")
+            print_stats(result)
+            if convo.save_error:
+                print(f"Warning: this reply wasn't saved ({convo.save_error}).")
+    finally:
+        # Close the database files so nothing is left locked (Windows cares).
+        if knowledge:
+            knowledge.close()
+        if store:
+            store.close()
 
 
 if __name__ == "__main__":

@@ -8,8 +8,9 @@ drops files that were deleted or whose folder was removed from the config.
 """
 
 import hashlib
+import re
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Callable
 
@@ -46,19 +47,35 @@ class KnowledgeSettings:
     top_k: int = 4
     min_score: float = 0.5
     use_in_chat: bool = True
+    # Prefixes set in the config apply to the configured model only.
+    configured_prefixes: dict[str, tuple[str, str]] = field(default_factory=dict)
+
+    @property
+    def index_path(self) -> Path:
+        """Each embedding model has its own index file next to `database`, e.g.
+        knowledge-nomic-embed-text.db, so switching models doesn't erase the other's index."""
+        slug = re.sub(r"[^A-Za-z0-9._-]+", "-", self.embedding_model.removesuffix(":latest"))
+        return self.database.with_name(f"{self.database.stem}-{slug}{self.database.suffix}")
+
+    def with_model(self, model: str) -> "KnowledgeSettings":
+        """A copy of these settings for another embedding model, with its prefixes."""
+        doc, query = self.configured_prefixes.get(model) or prefixes_for(model)
+        return replace(self, embedding_model=model, document_prefix=doc, query_prefix=query)
 
     @classmethod
     def from_config(cls, config: dict) -> "KnowledgeSettings":
         k = config.get("knowledge") or {}
         model = k.get("embedding_model") or "nomic-embed-text"
-        default_doc, default_query = KNOWN_PREFIXES.get(model.split(":")[0], ("", ""))
+        default_doc, default_query = prefixes_for(model)
+        document_prefix = _or(k.get("document_prefix"), default_doc)
+        query_prefix = _or(k.get("query_prefix"), default_query)
         extensions = k.get("extensions")
         return cls(
             folders=[resolve(f) for f in (k.get("folders") or ["knowledge"])],
             database=resolve(k.get("database") or "data/indexes/knowledge.db"),
             embedding_model=model,
-            document_prefix=_or(k.get("document_prefix"), default_doc),
-            query_prefix=_or(k.get("query_prefix"), default_query),
+            document_prefix=document_prefix,
+            query_prefix=query_prefix,
             chunk_size=int(k.get("chunk_size", 1000)),
             chunk_overlap=int(k.get("chunk_overlap", 150)),
             batch_size=int(k.get("batch_size", 16)),
@@ -68,7 +85,12 @@ class KnowledgeSettings:
             top_k=int(k.get("top_k", 4)),
             min_score=float(k.get("min_score", 0.5)),
             use_in_chat=bool(k.get("use_in_chat", True)),
+            configured_prefixes={model: (document_prefix, query_prefix)},
         )
+
+
+def prefixes_for(model: str) -> tuple[str, str]:
+    return KNOWN_PREFIXES.get(model.split(":")[0], ("", ""))
 
 
 def _or(value, default):

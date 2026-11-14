@@ -11,7 +11,7 @@ python -m app.main --check     # test the connection and list installed models
 python -m app.main             # start chatting
 ```
 
-Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/kb on|off`, `/sources`, `/index`, `/help`, `/exit`.
+Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/kb on|off`, `/sources`, `/index`, `/embed <name>`, `/help`, `/exit`.
 After each reply it prints tokens, tokens/sec, model load time, and total time, which is handy for the performance baseline.
 
 `inference.think` is left empty by default, so qwen3 reasons first and Ollama hides the reasoning.
@@ -71,7 +71,18 @@ After each answer the app prints the sources and a match score from 0 to 1. Pass
 
 Sources are sent with that one question only, so they don't fill up the model's memory in later
 turns, and the saved conversation records which sources each reply used (`message_sources` table).
-The index lives in `data/indexes/knowledge.db`. It's safe to delete; `--index` rebuilds it.
+### Trying other embedding models
+
+`/embed` shows the current embedding model and the ones installed on the ai-pc, and
+`/embed qwen3-embedding:0.6b` switches to another for this chat (`--embed-model <name>` does
+the same from the start). Each model keeps its own index file, such as
+`data/indexes/knowledge-nomic-embed-text.db`, because one model's numbers can't be compared with
+another's. The first time you switch to a model, run `/index` to build its index. After that,
+switching back and forth is instant. Match scores differ between models, so a good
+`min_score` for one may not suit another. To keep a model as the default, set
+`knowledge.embedding_model` in `config/local.yaml`.
+
+The index files are safe to delete; `--index` rebuilds them.
 
 ## Pointing it at the ai-pc
 
