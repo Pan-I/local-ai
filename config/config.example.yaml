@@ -24,8 +24,29 @@ storage:
 
 agents:
   default_agent: general
+  # The most times one message can go back and forth with tool results
+  # before the model has to answer.
   max_iterations: 10
   require_approval_for_tools: true
+
+tools:
+  # Lets the model ask the app to list folders, read files and search your
+  # documents. Turn off for one chat with --no-tools, or /tools off.
+  enabled: true
+  # The only folders the tools can read (relative to the local-ai folder, or
+  # full paths). "." is the local-ai folder itself, so the model can read the
+  # app's own code.
+  folders:
+    - knowledge
+    - .
+  # Refused even inside those folders. Hidden files and folders (.git, .env,
+  # .venv, ...) are always refused.
+  blocked:
+    - config/local.yaml
+    - config/secrets.yaml
+    - "*.db"
+  max_read_chars: 4000     # read_file returns long files in pieces this size
+  max_list_entries: 200
 knowledge:
   # Folders the app may read documents from (relative to the local-ai folder,
   # or full paths like "C:/Users/me/Documents/notes"). Nothing outside these

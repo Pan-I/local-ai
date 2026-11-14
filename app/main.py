@@ -6,6 +6,7 @@ Run from the local-ai folder:
     python -m app.main --check
     python -m app.main --no-save
     python -m app.main --index       # read the approved folders into the knowledge index
+    python -m app.main --no-tools    # chat without letting the model use tools
 """
 
 import argparse
@@ -14,9 +15,11 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
+from agent.folders import ToolError
+from agent.tools import Toolbox, ToolOutcome, ToolSettings, describe_call
 from app.config import ROOT, load_config
 from app.conversation import Conversation
-from app.ollama_client import OllamaClient, OllamaError
+from app.ollama_client import OllamaClient, OllamaError, ToolCall
 from retrieval.indexer import Indexer, IndexReport, KnowledgeSettings
 from retrieval.retriever import Retriever
 from retrieval.store import KnowledgeStore
@@ -34,6 +37,8 @@ HELP = """Commands:
   /sources        show the passages the last answer was given
   /index          update the knowledge index from the approved folders
   /embed [name]   show or switch the embedding model (each has its own index)
+  /tools [on|off] show or set whether the model can use tools (read files, search)
+  /tools log      show the last 10 tool calls
   /exit           quit"""
 
 
@@ -181,6 +186,45 @@ def print_sources(hits, verbose: bool = False) -> None:
             print(f"      {preview[:200]}{'...' if len(preview) > 200 else ''}")
 
 
+class ReplyPrinter:
+    """Prints a reply as it streams, with a line for each tool the model uses."""
+
+    def __init__(self):
+        self.after_tool = False
+
+    def token(self, text: str) -> None:
+        if self.after_tool:
+            print("AI: ", end="")
+            self.after_tool = False
+        print(text, end="", flush=True)
+
+    def tool(self, call: ToolCall) -> None:
+        # Start a new line, unless the last tool's line already ended.
+        start = "" if self.after_tool else "\n"
+        print(f"{start}  [tool] {describe_call(call.name, call.arguments)}", end="", flush=True)
+
+    def tool_done(self, outcome: ToolOutcome) -> None:
+        if outcome.ok:
+            print(f"  -> ok, {len(outcome.text):,} characters")
+        else:
+            print(f"  -> {outcome.text}")
+        self.after_tool = True
+
+
+def print_tool_log(store: ConversationStore | None) -> None:
+    if store is None:
+        print("Saving is off, so tool calls aren't logged. Run without --no-save to log them.")
+        return
+    calls = store.recent_tool_calls()
+    if not calls:
+        print("No tool calls logged yet.")
+        return
+    for c in reversed(calls):
+        when = datetime.fromisoformat(c.created_at).astimezone().strftime("%Y-%m-%d %H:%M")
+        convo = f"chat {c.conversation_id}" if c.conversation_id else "unsaved"
+        print(f"{c.id:>4}  {when}  {convo:<9}  {c.status:<5}  {describe_call(c.tool, c.arguments)}")
+
+
 def print_stats(result) -> None:
     print(
         f"[{result.model} | {result.completion_tokens} tokens, "
@@ -205,6 +249,8 @@ def main(argv=None) -> int:
     parser.add_argument("--embed-model", help="override knowledge.embedding_model for this run")
     parser.add_argument("--no-kb", action="store_true",
                         help="don't use your documents in this chat")
+    parser.add_argument("--no-tools", action="store_true",
+                        help="don't let the model use tools in this chat")
     args = parser.parse_args(argv)
 
     config = load_config()
@@ -239,8 +285,20 @@ def main(argv=None) -> int:
 
     store = open_store(config.get("storage", {}), args.no_save)
     retriever = Retriever(client, knowledge, settings) if knowledge else None
+    tool_settings = ToolSettings.from_config(config)
+    toolbox = Toolbox(tool_settings)
     convo = Conversation(client, model, load_system_prompt(), think=think, store=store,
-                         retriever=retriever)
+                         retriever=retriever, toolbox=toolbox,
+                         max_tool_rounds=tool_settings.max_iterations)
+    convo.use_tools = tool_settings.enabled and not args.no_tools
+
+    def search_documents(query: str):
+        # Uses whichever index /embed last switched to.
+        if convo.retriever is None:
+            raise ToolError("the knowledge index isn't available")
+        return convo.retriever.search(query)
+
+    toolbox.search = search_documents
     print(f"Chatting with {model} at {base_url}. Type /help for commands.")
     if store:
         print(f"Saving conversations to {store.path}")
@@ -256,6 +314,10 @@ def main(argv=None) -> int:
             state = "on" if convo.use_knowledge else "off (/kb on to use it)"
             print(f"Knowledge: {chunks} chunks from {files} files "
                   f"(embedded with {settings.embedding_model}), {state}.")
+    if convo.use_tools:
+        print(f"Tools: on. The model can read files in: {toolbox.folders.describe()}")
+    else:
+        print("Tools: off (/tools on to use them).")
 
     try:
         while True:
@@ -356,6 +418,19 @@ def main(argv=None) -> int:
                         convo.use_knowledge = False
                         print("It has no index yet, so document lookup is off. Run /index to "
                               "build it (every file gets embedded, so this can take a while).")
+                elif cmd == "/tools":
+                    setting = arg.strip().lower()
+                    if setting == "log":
+                        print_tool_log(store)
+                        continue
+                    if setting in ("on", "off"):
+                        convo.use_tools = setting == "on"
+                    elif setting:
+                        print("Use /tools on, /tools off, or /tools log.")
+                        continue
+                    state = "on" if convo.use_tools else "off"
+                    print(f"Tools are {state}. Allowed folders: {toolbox.folders.describe()}")
+                    print("Tools: " + ", ".join(toolbox.tools))
                 elif cmd == "/models":
                     try:
                         print("\n".join(client.list_models()) or "(no models installed)")
@@ -381,11 +456,14 @@ def main(argv=None) -> int:
                 continue
 
             print("\nAI: ", end="", flush=True)
+            printer = ReplyPrinter()
             try:
                 result = convo.send(
                     text,
                     stream=stream,
-                    on_token=lambda t: print(t, end="", flush=True),
+                    on_token=printer.token,
+                    on_tool=printer.tool,
+                    on_tool_done=printer.tool_done,
                 )
             except OllamaError as e:
                 print(f"\nError: {e}")
@@ -394,7 +472,7 @@ def main(argv=None) -> int:
                 print("\n(interrupted)")
                 continue
             if not stream:
-                print(result.content, end="")
+                printer.token(result.content)
             print()
             if convo.last_sources:
                 print_sources(convo.last_sources)
@@ -402,6 +480,11 @@ def main(argv=None) -> int:
                 print("(No closely matching passages in your documents.)")
             if convo.knowledge_error:
                 print(f"Warning: couldn't search your documents ({convo.knowledge_error}).")
+            if convo.tools_unsupported_error:
+                print(f"Note: {convo.model} can't use tools, so it answered without them. "
+                      "Tools are off until you turn them on with /tools on.")
+            if convo.tool_log_error:
+                print(f"Warning: a tool call wasn't logged ({convo.tool_log_error}).")
             print_stats(result)
             if convo.save_error:
                 print(f"Warning: this reply wasn't saved ({convo.save_error}).")

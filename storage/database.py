@@ -2,9 +2,10 @@
 
 Uses Python's built-in sqlite3 module, so there is nothing extra to install.
 Each conversation is a row in `conversations`, and each user message or model
-reply is a row in `messages`.
+reply is a row in `messages`. Each tool the model used is a row in `tool_calls`.
 """
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -48,7 +49,26 @@ CREATE TABLE IF NOT EXISTS message_sources (
     score      REAL NOT NULL,
     PRIMARY KEY (message_id, rank)
 );
+
+-- Every tool the model asked the app to run (see agent/), saved as it happens.
+-- conversation_id and message_id are filled in when the reply is saved, and
+-- stay empty if the chat failed or was interrupted before that.
+CREATE TABLE IF NOT EXISTS tool_calls (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    conversation_id INTEGER REFERENCES conversations(id) ON DELETE SET NULL,
+    message_id      INTEGER REFERENCES messages(id) ON DELETE SET NULL,
+    model           TEXT NOT NULL,
+    tool            TEXT NOT NULL,
+    arguments       TEXT NOT NULL,   -- JSON, exactly as the model sent them
+    status          TEXT NOT NULL,   -- ok or error
+    result          TEXT NOT NULL,   -- what the model was sent (cut to 2,000 characters)
+    result_chars    INTEGER NOT NULL,
+    seconds         REAL NOT NULL,
+    created_at      TEXT NOT NULL
+);
 """
+
+LOGGED_RESULT_CHARS = 2000
 
 TITLE_LENGTH = 60
 
@@ -69,6 +89,18 @@ class SavedConversation:
     model: str
     system_prompt: str
     messages: list[dict]  # [{"role": ..., "content": ...}], oldest first
+
+
+@dataclass
+class ToolCallRecord:
+    id: int
+    conversation_id: int | None
+    tool: str
+    arguments: dict
+    status: str
+    result: str
+    seconds: float
+    created_at: str
 
 
 def now() -> str:
@@ -107,10 +139,11 @@ class ConversationStore:
         return cur.lastrowid
 
     def add_turn(self, conversation_id: int, user_text: str, result: ChatResult,
-                 sources=()) -> None:
+                 sources=(), tool_call_ids=()) -> int:
         """Save a user message and the model's reply together (both or neither).
 
-        sources are the retrieval Hits the reply was given, if any.
+        sources are the retrieval Hits the reply was given, if any, and
+        tool_call_ids the logged tool calls behind it. Returns the reply's id.
         """
         stamp = now()
         with self.db:  # one transaction
@@ -135,11 +168,39 @@ class ConversationStore:
                 [(cur.lastrowid, rank, h.display, h.location, h.score)
                  for rank, h in enumerate(sources, start=1)],
             )
+            self.db.executemany(
+                "UPDATE tool_calls SET conversation_id = ?, message_id = ? WHERE id = ?",
+                [(conversation_id, cur.lastrowid, i) for i in tool_call_ids],
+            )
             # The first message becomes the title.
             self.db.execute(
                 "UPDATE conversations SET updated_at = ?, title = COALESCE(title, ?) WHERE id = ?",
                 (stamp, make_title(user_text), conversation_id),
             )
+        return cur.lastrowid
+
+    def log_tool_call(self, model: str, tool: str, arguments: dict, status: str,
+                      result: str, seconds: float) -> int:
+        """Record one tool call right away, before the reply exists. Returns its id."""
+        with self.db:
+            cur = self.db.execute(
+                "INSERT INTO tool_calls (model, tool, arguments, status, result, result_chars,"
+                " seconds, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+                (model, tool, json.dumps(arguments, ensure_ascii=False, default=str), status,
+                 result[:LOGGED_RESULT_CHARS], len(result), seconds, now()),
+            )
+        return cur.lastrowid
+
+    def recent_tool_calls(self, limit: int = 10) -> list[ToolCallRecord]:
+        """Newest first."""
+        rows = self.db.execute(
+            "SELECT * FROM tool_calls ORDER BY id DESC LIMIT ?", (limit,)
+        ).fetchall()
+        return [
+            ToolCallRecord(r["id"], r["conversation_id"], r["tool"], json.loads(r["arguments"]),
+                           r["status"], r["result"], r["seconds"], r["created_at"])
+            for r in rows
+        ]
 
     def list_conversations(self, limit: int = 10) -> list[ConversationSummary]:
         """Most recently used first (message ids only go up, so the newest one wins)."""

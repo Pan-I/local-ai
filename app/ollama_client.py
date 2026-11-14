@@ -8,7 +8,7 @@ import http.client
 import json
 import urllib.error
 import urllib.request
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Iterable
 
 
@@ -17,10 +17,21 @@ class OllamaError(Exception):
 
 
 @dataclass
+class ToolCall:
+    """The model asking the app to run one tool, e.g. read_file(path="notes.md")."""
+    name: str
+    arguments: dict
+    # The call exactly as Ollama sent it, to send back in the conversation.
+    raw: dict = field(default_factory=dict)
+
+
+@dataclass
 class ChatResult:
     content: str
     model: str
     thinking: str = ""
+    # Tools the model asked for instead of (or before) answering. Empty for a plain reply.
+    tool_calls: list[ToolCall] = field(default_factory=list)
     prompt_tokens: int = 0
     completion_tokens: int = 0
     prompt_seconds: float = 0.0
@@ -106,18 +117,25 @@ class OllamaClient:
         stream: bool = True,
         on_token: Callable[[str], None] | None = None,
         think: bool | None = None,
+        tools: list[dict] | None = None,
     ) -> ChatResult:
         """Send a chat request. If streaming, on_token is called with each text chunk.
 
         think=False asks a thinking model (like qwen3) to answer directly; None
         leaves it to the model's default. Thinking text is returned separately in
         ChatResult.thinking and never passed to on_token.
+
+        tools describes the tools the model may ask for (see agent/tools.py). Any
+        requests come back in ChatResult.tool_calls; running them is up to the caller.
         """
         body = {"model": model, "messages": list(messages), "stream": stream}
         if think is not None:
             body["think"] = think
+        if tools:
+            body["tools"] = tools
         parts: list[str] = []
         thinking: list[str] = []
+        calls: list[dict] = []
         final: dict = {}
         try:
             resp = self._request("POST", "/api/chat", body)
@@ -142,6 +160,7 @@ class OllamaClient:
                         if "error" in chunk:
                             raise OllamaError(chunk["error"])
                         message = chunk.get("message", {})
+                        calls.extend(message.get("tool_calls") or [])
                         if message.get("thinking"):
                             thinking.append(message["thinking"])
                         text = message.get("content", "")
@@ -156,6 +175,7 @@ class OllamaClient:
                     if "error" in final:
                         raise OllamaError(final["error"])
                     message = final.get("message", {})
+                    calls.extend(message.get("tool_calls") or [])
                     thinking.append(message.get("thinking", ""))
                     parts.append(message.get("content", ""))
             except TimeoutError as e:
@@ -172,6 +192,7 @@ class OllamaClient:
             content="".join(parts),
             model=final.get("model", model),
             thinking="".join(thinking),
+            tool_calls=[parse_tool_call(c) for c in calls],
             prompt_tokens=final.get("prompt_eval_count", 0),
             completion_tokens=final.get("eval_count", 0),
             prompt_seconds=final.get("prompt_eval_duration", 0) / ns,
@@ -179,3 +200,18 @@ class OllamaClient:
             load_seconds=final.get("load_duration", 0) / ns,
             total_seconds=final.get("total_duration", 0) / ns,
         )
+
+
+def parse_tool_call(raw: dict) -> ToolCall:
+    """Ollama sends {"function": {"name": ..., "arguments": {...}}}. Some models
+    send the arguments as a JSON string instead, so that's accepted too."""
+    function = raw.get("function") or {}
+    arguments = function.get("arguments") or {}
+    if isinstance(arguments, str):
+        try:
+            arguments = json.loads(arguments)
+        except ValueError:
+            arguments = {"_unparsed": arguments}
+    if not isinstance(arguments, dict):
+        arguments = {"_unparsed": arguments}
+    return ToolCall(name=str(function.get("name", "")), arguments=arguments, raw=raw)

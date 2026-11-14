@@ -11,7 +11,7 @@ python -m app.main --check     # test the connection and list installed models
 python -m app.main             # start chatting
 ```
 
-Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/kb on|off`, `/sources`, `/index`, `/embed <name>`, `/help`, `/exit`.
+Inside the chat: `/models`, `/model qwen3:0.6b`, `/think on|off|default`, `/history`, `/load <id>`, `/reset`, `/kb on|off`, `/sources`, `/index`, `/embed <name>`, `/tools on|off|log`, `/help`, `/exit`.
 After each reply it prints tokens, tokens/sec, model load time, and total time, which is handy for the performance baseline.
 
 `inference.think` is left empty by default, so qwen3 reasons first and Ollama hides the reasoning.
@@ -84,6 +84,37 @@ switching back and forth is instant. Match scores differ between models, so a go
 
 The index files are safe to delete; `--index` rebuilds them.
 
+## Letting the model use tools
+
+The model can ask the app to run a few *tools*: small Python functions that read your files.
+It never runs anything itself. With each message, the app sends a short description of each
+tool. The model either answers, or replies with a request like `read_file(path="knowledge/todo.md")`.
+The app checks the request, runs the function, sends the result back, and asks the model again.
+That repeats until the model answers, at most `agents.max_iterations` times (10).
+
+The tools only read:
+
+- `list_folder(path)` lists the files and subfolders in a folder.
+- `read_file(path, start_line)` reads a text, code, PDF or Word file, in pieces of about
+  4,000 characters (`tools.max_read_chars`), so a big file doesn't flood the model.
+- `search_knowledge(query)` searches your indexed documents, like the automatic lookup, but
+  with words the model picks.
+
+They can only reach the folders under `tools.folders`: `knowledge` and the local-ai folder
+itself (`.`), so the model can also read the app's code. Paths outside those, hidden files and
+folders (`.git`, `.env`, `.venv`), and anything in `tools.blocked` (your `config/local.yaml`
+and `*.db` files) are refused.
+
+In the chat, each tool call is shown as it runs, e.g. `[tool] read_file(path='knowledge/todo.md')  -> ok, 812 characters`.
+Every call is also saved to the `tool_calls` table in the conversation database, with its
+arguments, whether it worked, and the start of what it returned. `/tools log` shows the last 10.
+With `--no-save` nothing is logged.
+
+`/tools off` (or `--no-tools`) turns them off, and `/tools on` back on. Each tool round trip is
+another full model call, so on the ai-pc a tool-using answer takes about 2 to 3 times as long.
+`qwen3:4b` handles tools well. Models that can't use tools (many older or very small
+models) simply answer without them, and the app turns tools off for that chat.
+
 ## Pointing it at the ai-pc
 
 Settings come from `config/config.example.yaml`, with `config/local.yaml` merged on top for this machine.
@@ -126,4 +157,6 @@ The tests use a fake Ollama server, so they pass without the ai-pc.
 - `retrieval/indexer.py` finds files in the approved folders and embeds them
 - `retrieval/store.py` keeps chunks and embeddings in SQLite and searches them
 - `retrieval/retriever.py` finds passages for a question and adds them to the prompt
+- `agent/tools.py` defines the tools the model can ask for and runs them
+- `agent/folders.py` checks that a tool only touches the allowed folders
 - `prompts/system/system.txt` is the system prompt
